@@ -1,0 +1,4 @@
+interface:
+  display_name: "Invoke Claude Agent"
+  short_description: "Launch and supervise direct Claude agents"
+  default_prompt: "Use $invoke-claude-agent to delegate this bounded task to a direct Claude agent."
