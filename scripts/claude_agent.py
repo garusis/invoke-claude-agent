@@ -21,6 +21,13 @@ ROLE_MODES = {
     "implementer": "auto",
     "reviewer": "plan",
 }
+MODELS_BY_TASK_CLASS = {
+    "standard": "claude-sonnet-5",
+    "complex": "claude-opus-5",
+    "frontier": "claude-fable-5-1",
+}
+ALLOWED_MODELS = tuple(MODELS_BY_TASK_CLASS.values())
+DEFAULT_TASK_CLASS = "complex"
 ACTIVE_STATES = {"working", "starting", "running"}
 ACTIVE_STATUSES = {"busy", "working", "starting"}
 
@@ -131,7 +138,9 @@ def prompt_fingerprint(text: str) -> dict[str, Any]:
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def add_execution_options(parser: argparse.ArgumentParser, *, role: bool) -> None:
+def add_execution_options(
+    parser: argparse.ArgumentParser, *, role: bool, require_model: bool,
+) -> None:
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--prompt")
     parser.add_argument("--prompt-file")
@@ -140,9 +149,15 @@ def add_execution_options(parser: argparse.ArgumentParser, *, role: bool) -> Non
         parser.add_argument("--name", required=True)
     else:
         parser.add_argument("--name")
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", required=require_model, choices=ALLOWED_MODELS)
+    if not require_model:
+        parser.add_argument("--task-class", choices=tuple(MODELS_BY_TASK_CLASS))
     parser.add_argument("--effort", required=True, choices=("low", "medium", "high", "xhigh", "max"))
     parser.add_argument("--permission-mode", choices=("plan", "auto", "acceptEdits", "dontAsk", "manual"))
+    parser.add_argument(
+        "--bypass-permissions", action="store_true",
+        help="explicitly run with bypassPermissions; never enabled by default",
+    )
     parser.add_argument("--add-dir", action="append", default=[])
     parser.add_argument("--disallow", action="append", default=[])
     parser.add_argument("--safe-mode", action="store_true")
@@ -150,28 +165,54 @@ def add_execution_options(parser: argparse.ArgumentParser, *, role: bool) -> Non
     parser.add_argument("--dry-run", action="store_true")
 
 
+def resolve_model(args: argparse.Namespace) -> tuple[str, str, str]:
+    task_class = getattr(args, "task_class", None)
+    if args.model and task_class:
+        raise AgentError("Choose either --model or --task-class, not both")
+    if args.model:
+        inferred = next(
+            key for key, value in MODELS_BY_TASK_CLASS.items() if value == args.model
+        )
+        return args.model, inferred, "explicit_model"
+    selected_class = task_class or DEFAULT_TASK_CLASS
+    return MODELS_BY_TASK_CLASS[selected_class], selected_class, (
+        "task_class" if task_class else "default"
+    )
+
+
+def resolve_permission_mode(args: argparse.Namespace) -> str:
+    if args.bypass_permissions and args.permission_mode:
+        raise AgentError(
+            "Choose either --bypass-permissions or --permission-mode, not both"
+        )
+    if args.bypass_permissions:
+        return "bypassPermissions"
+    if args.permission_mode:
+        return args.permission_mode
+    if not hasattr(args, "role"):
+        raise AgentError("--permission-mode is required for resume unless bypass is explicit")
+    return ROLE_MODES[args.role]
+
+
 def execution_argv(
     args: argparse.Namespace, executable: str, prompt: str, *, session_id: str,
-    resume: bool,
+    resume: bool, model: str, permission_mode: str,
 ) -> list[str]:
-    mode = args.permission_mode
-    if not mode:
-        if not hasattr(args, "role"):
-            raise AgentError("--permission-mode is required for resume")
-        mode = ROLE_MODES[args.role]
     disallowed = ["Agent", "Task", *args.disallow]
     argv = [executable, "-p", "--bg"]
     if args.name:
         argv += ["--name", args.name]
     argv += ["--resume" if resume else "--session-id", session_id]
     argv += [
-        "--model", args.model,
+        "--model", model,
         "--effort", args.effort,
-        "--permission-mode", mode,
+        "--permission-mode", permission_mode,
         "--disallowedTools", ",".join(dict.fromkeys(disallowed)),
         "--output-format", "stream-json",
         "--verbose",
     ]
+    if args.bypass_permissions:
+        argv.append("--allow-dangerously-skip-permissions")
     if args.safe_mode:
         argv.append("--safe-mode")
     for value in args.add_dir:
@@ -191,15 +232,23 @@ def command_launch(args: argparse.Namespace) -> dict[str, Any]:
     executable = claude_executable(args.claude_bin)
     cwd = working_directory(args.cwd)
     prompt = read_prompt(args)
+    model, task_class, model_source = resolve_model(args)
+    permission_mode = resolve_permission_mode(args)
     session_id = str(uuid.uuid4())
-    argv = execution_argv(args, executable, prompt, session_id=session_id, resume=False)
+    argv = execution_argv(
+        args, executable, prompt, session_id=session_id, resume=False,
+        model=model, permission_mode=permission_mode,
+    )
     base = {
         "operation": "launch",
         "cwd": cwd,
         "session_id": session_id,
-        "requested_model": args.model,
+        "requested_model": model,
+        "task_class": task_class,
+        "model_selection_source": model_source,
         "effort": args.effort,
-        "permission_mode": args.permission_mode or ROLE_MODES[args.role],
+        "permission_mode": permission_mode,
+        "bypass_permissions": args.bypass_permissions,
         "prompt": prompt_fingerprint(prompt),
         "command": redacted_command(argv),
     }
@@ -238,6 +287,8 @@ def command_resume(args: argparse.Namespace) -> dict[str, Any]:
     executable = claude_executable(args.claude_bin)
     cwd = working_directory(args.cwd)
     prompt = read_prompt(args)
+    model, task_class, model_source = resolve_model(args)
+    permission_mode = resolve_permission_mode(args)
     rows = agent_rows(executable)
     row = find_agent(rows, args.session_id)
     if row.get("sessionId") != args.session_id:
@@ -252,7 +303,10 @@ def command_resume(args: argparse.Namespace) -> dict[str, Any]:
         else:
             invoke([executable, "stop", str(row["id"])])
             stopped = True
-    argv = execution_argv(args, executable, prompt, session_id=args.session_id, resume=True)
+    argv = execution_argv(
+        args, executable, prompt, session_id=args.session_id, resume=True,
+        model=model, permission_mode=permission_mode,
+    )
     base = {
         "operation": "resume",
         "cwd": cwd,
@@ -260,9 +314,12 @@ def command_resume(args: argparse.Namespace) -> dict[str, Any]:
         "prior_agent_id": row.get("id"),
         "stopped_first": stopped,
         "would_stop_first": would_stop,
-        "requested_model": args.model,
+        "requested_model": model,
+        "task_class": task_class,
+        "model_selection_source": model_source,
         "effort": args.effort,
-        "permission_mode": args.permission_mode,
+        "permission_mode": permission_mode,
+        "bypass_permissions": args.bypass_permissions,
         "prompt": prompt_fingerprint(prompt),
         "command": redacted_command(argv),
     }
@@ -313,13 +370,28 @@ def command_collect(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def command_select_model(args: argparse.Namespace) -> dict[str, Any]:
+    task_class = args.task_class or DEFAULT_TASK_CLASS
+    return {
+        "operation": "select-model",
+        "task_class": task_class,
+        "model": MODELS_BY_TASK_CLASS[task_class],
+        "selection_source": "task_class" if args.task_class else "default",
+        "allowed_models": list(ALLOWED_MODELS),
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--claude-bin", default="claude")
     sub = root.add_subparsers(dest="command", required=True)
 
+    select_model = sub.add_parser("select-model", help="resolve the deterministic model policy")
+    select_model.add_argument("--task-class", choices=tuple(MODELS_BY_TASK_CLASS))
+    select_model.set_defaults(handler=command_select_model)
+
     launch = sub.add_parser("launch", help="start a fresh Claude background agent")
-    add_execution_options(launch, role=True)
+    add_execution_options(launch, role=True, require_model=False)
     launch.set_defaults(handler=command_launch)
 
     listing = sub.add_parser("list", help="list Claude background agents")
@@ -339,7 +411,7 @@ def parser() -> argparse.ArgumentParser:
     resume = sub.add_parser("resume", help="send a follow-up to an exact quiescent session")
     resume.add_argument("--session-id", required=True)
     resume.add_argument("--stop-first", action="store_true")
-    add_execution_options(resume, role=False)
+    add_execution_options(resume, role=False, require_model=True)
     resume.set_defaults(handler=command_resume)
 
     stop = sub.add_parser("stop", help="stop an active agent while preserving its conversation")
