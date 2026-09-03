@@ -55,6 +55,7 @@ Available operations:
 
 | Command | Purpose |
 | --- | --- |
+| `select-model` | Resolve the deterministic task-class-to-model policy without launching Claude. |
 | `launch` | Start a fresh named Claude background agent with a new session UUID. |
 | `list` | List native Claude agent records, optionally filtered by directory. |
 | `status` | Resolve a short agent ID or full session UUID and report whether it is active. |
@@ -70,7 +71,7 @@ python3 scripts/claude_agent.py launch \
   --cwd /absolute/path/to/project \
   --role implementer \
   --name fix-parser-boundary \
-  --model sonnet \
+  --task-class standard \
   --effort medium \
   --prompt-file /absolute/path/to/assignment.md
 ```
@@ -84,7 +85,7 @@ Example follow-up after the agent is no longer active:
 python3 scripts/claude_agent.py resume \
   --session-id 00000000-0000-4000-8000-000000000000 \
   --cwd /absolute/path/to/project \
-  --model sonnet \
+  --model claude-sonnet-5 \
   --effort medium \
   --permission-mode auto \
   --prompt-file /absolute/path/to/follow-up.md
@@ -93,6 +94,32 @@ python3 scripts/claude_agent.py resume \
 `resume` requires the full session UUID and refuses to copy or resume an active
 session accidentally. Use `--stop-first` only when stopping the active agent is
 explicitly intended.
+
+## Model selection
+
+The helper permits exactly three model IDs and maps task classes
+deterministically:
+
+| Task class | Model | Intended work |
+| --- | --- | --- |
+| `standard` | `claude-sonnet-5` | Clear, bounded coding, tests, documentation, analysis, or tool use where speed and cost matter. |
+| `complex` | `claude-opus-5` | Complex coding, architecture, large refactors, difficult debugging, advanced research, and sustained agentic work. |
+| `frontier` | `claude-fable-5-1` | Exceptionally demanding reasoning, long-horizon work, or cases where Opus 5 at higher effort is insufficient. |
+
+With no `--model` or `--task-class`, `launch` defaults to `complex` and
+`claude-opus-5`. Fable 5.1 is the slowest and most expensive per token, so it is
+reserved for tasks that require substantially more thinking. The full rationale
+and official Anthropic sources are in
+[`references/model-selection.md`](references/model-selection.md).
+
+Inspect the policy without launching an agent:
+
+```bash
+python3 scripts/claude_agent.py select-model --task-class frontier
+```
+
+An explicit `--model` must be one of the three exact IDs and cannot be combined
+with `--task-class`. Resume requires the model used by the original session.
 
 ## Permission model
 
@@ -103,8 +130,12 @@ delegation layer.
 
 The helper does not grant permission to commit, push, publish, spend money, or
 contact external parties. Those boundaries belong in the assignment and must
-come from the user. Avoid `--dangerously-skip-permissions`; the helper does not
-expose it.
+come from the user.
+
+Permission bypass is available through `--bypass-permissions`, but it is never a
+default and no role enables it automatically. Use it only after the user
+explicitly authorizes bypass for that invocation and the environment is suitably
+isolated. It cannot be combined with `--permission-mode`.
 
 ## Repository layout
 
@@ -114,6 +145,7 @@ invoke-claude-agent/
 ├── README.md
 ├── SKILL.md
 ├── agents/openai.yaml
+├── references/model-selection.md
 ├── scripts/claude_agent.py
 └── tests/test_claude_agent.py
 ```
@@ -137,7 +169,7 @@ available:
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 ```
 
-Before changing a CLI flag, compare it with the currently installed
+Before changing a CLI flag or model ID, compare it with the currently installed
 `claude --help`. Keep subprocess calls shell-free, keep prompts out of emitted
 metadata, and add an offline regression test for every execution-path change.
 

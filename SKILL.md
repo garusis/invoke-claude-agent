@@ -34,6 +34,27 @@ objective, relevant context or file paths, boundaries, acceptance criteria, and
 the concise result it must return. Tell it to report blockers instead of widening
 scope.
 
+## Select the model deterministically
+
+Only these models are allowed:
+
+| Task class | Model | Use when |
+| --- | --- | --- |
+| `standard` | `claude-sonnet-5` | The task is clear, bounded, and benefits from speed and lower cost. |
+| `complex` | `claude-opus-5` | The work needs complex coding, planning, judgment, or sustained agentic execution. |
+| `frontier` | `claude-fable-5-1` | The work needs unusually deep reasoning or a long horizon, or Opus 5 at higher effort has proved insufficient. |
+
+The default is `complex` / `claude-opus-5`. Fable 5.1 is the slowest and most
+expensive per token, so reserve it for tasks that genuinely require substantially
+more thought. Sonnet 5 is the fast, economical choice for well-specified routine
+work. Opus 5 is the default for most non-routine engineering and knowledge work.
+
+Read [model selection](references/model-selection.md) when classifying a task or
+when an explicit model choice is not already supplied. The helper never infers a
+model from prompt text: pass `--task-class`, pass one allowed exact `--model`, or
+accept the Opus 5 default. Use `select-model` to inspect the mapping without
+launching Claude. Never auto-escalate to a more expensive model after failure.
+
 ## Start a fresh background agent
 
 Confirm the CLI exists with `claude --version`. The working directory must
@@ -48,10 +69,13 @@ python3 <skill-dir>/scripts/claude_agent.py launch \
   --cwd "<working-directory>" \
   --role "<investigator|planner|implementer|reviewer>" \
   --name "<short-role-and-task>" \
-  --model "<model>" \
+  --task-class "<standard|complex|frontier>" \
   --effort "<low|medium|high|xhigh|max>" \
   --prompt-file "<assignment-file>"
 ```
+
+Omit `--task-class` to use the Opus 5 default. Alternatively pass `--model` with
+exactly one of `claude-sonnet-5`, `claude-opus-5`, or `claude-fable-5-1`.
 
 The helper defaults to `plan` for investigation, planning, and review, and
 `auto` for implementation. Override with `--permission-mode` only when the task
@@ -60,8 +84,11 @@ commands. Pass `--add-dir <path>` only for an explicitly allowed directory.
 
 Use `--safe-mode` when isolation from user/project Claude customizations is more
 important than loading their instructions. Otherwise omit it intentionally.
-Never use `--dangerously-skip-permissions` unless the user explicitly authorizes
-it and the environment is appropriately isolated.
+Permission bypass is supported but never selected by a role or default. Pass
+`--bypass-permissions` only when the user explicitly authorizes bypass for this
+invocation and the working environment is appropriately isolated. It is mutually
+exclusive with `--permission-mode`, and the helper records the choice in its
+output.
 
 Pin `--model` and `--effort` when identity matters. Preserve the requested
 identity and, when stream events expose it, the effective model actually used.
@@ -101,7 +128,7 @@ full session UUID with the same model, effort, and permission mode:
 python3 <skill-dir>/scripts/claude_agent.py resume \
   --session-id "<full-session-uuid>" \
   --cwd "<same-working-directory>" \
-  --model "<same-model>" \
+  --model "<same-exact-model-id>" \
   --effort "<same-effort>" \
   --permission-mode "<same-mode>" \
   --prompt-file "<compact-follow-up-file>"
@@ -115,6 +142,9 @@ redirected, use `stop --id <agent-id>` first, or pass `--stop-first` to `resume`
 only when stopping it is explicitly intended. Both paths preserve the
 conversation and working-tree edits. Use a fresh session instead when the role
 changes, the context changed materially, or independent judgment is required.
+
+Resume always requires the exact original model. Do not switch models inside the
+same conversation; launch a fresh session with a compact handoff instead.
 
 ## Separate roles and collect results
 
